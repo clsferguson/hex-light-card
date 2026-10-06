@@ -23,7 +23,7 @@
  *   initial_brightness (optional) initial slider value if the light has none
  */
 
-const CARD_VERSION = "1.0.1";
+const CARD_VERSION = "1.0.2";
 
 const HEX_FULL = /^#?([0-9a-fA-F]{6})$/;
 const HEX_SHORT = /^#?([0-9a-fA-F]{3})$/;
@@ -200,6 +200,22 @@ class HexLightCardElement extends HTMLElement {
     const light = primaryId ? hass.states[primaryId] : undefined;
     const isOn = !!(light && light.state === "on");
 
+    if (this._lightId && primaryId !== this._lightId) {
+      this.innerHTML = "";
+      this._built = false;
+    }
+
+    if (this._built) {
+      if (!light) {
+        // Entity disappeared — fall through to a full rebuild (error row).
+        this.innerHTML = "";
+        this._built = false;
+      } else {
+        this._updateFromLight(light, isOn);
+        return;
+      }
+    }
+
     this.innerHTML = "";
     const root = document.createElement("div");
     root.style.padding = "12px";
@@ -228,6 +244,7 @@ class HexLightCardElement extends HTMLElement {
       pill.style.borderRadius = "10px";
       pill.style.background = isOn ? "#3cb44b" : "#888";
       pill.style.color = "#fff";
+      this._pill = pill;
       titleRow.appendChild(title);
       titleRow.appendChild(pill);
       root.appendChild(titleRow);
@@ -259,10 +276,12 @@ class HexLightCardElement extends HTMLElement {
       swatch.style.borderRadius = "4px";
       swatch.style.border = "1px solid rgba(128,128,128,0.4)";
       swatch.style.background = info.hex || "transparent";
+      this._swatch = swatch;
       const curHex = document.createElement("span");
       curHex.style.fontSize = "13px";
       curHex.style.fontFamily = "monospace";
       curHex.textContent = info.hex || (isOn ? "n/a" : "off");
+      this._curHex = curHex;
       curRow.appendChild(label);
       curRow.appendChild(swatch);
       curRow.appendChild(curHex);
@@ -290,6 +309,7 @@ class HexLightCardElement extends HTMLElement {
     const colorInput = document.createElement("input");
     colorInput.type = "color";
     colorInput.value = info.hex || "#ffffff";
+    this._colorInput = colorInput;
     colorInput.style.width = "44px";
     colorInput.style.height = "34px";
     colorInput.style.padding = "0";
@@ -300,6 +320,7 @@ class HexLightCardElement extends HTMLElement {
     const hexInput = document.createElement("input");
     hexInput.type = "text";
     hexInput.value = info.hex || "#ffffff";
+    this._hexInput = hexInput;
     hexInput.placeholder = "#rrggbb";
     hexInput.maxLength = 7;
     hexInput.style.flex = "1";
@@ -318,12 +339,24 @@ class HexLightCardElement extends HTMLElement {
       status.textContent = msg;
       status.style.color = msg ? (ok ? "#3cb44b" : "#c33") : "";
     };
+    this._setStatus = setStatus;
 
     const doApply = () => this._applyColor(hexInput, setStatus, cfg, hass);
 
+    colorInput.addEventListener("click", () => {
+      this._picking = true;
+    });
     colorInput.addEventListener("input", () => {
+      this._picking = true;
       hexInput.value = colorInput.value;
       setStatus("");
+    });
+    colorInput.addEventListener("blur", () => {
+      this._picking = false;
+    });
+    colorInput.addEventListener("change", () => {
+      this._picking = false;
+      doApply();
     });
     hexInput.addEventListener("input", () => {
       const n = normalizeHex(hexInput.value);
@@ -338,7 +371,6 @@ class HexLightCardElement extends HTMLElement {
     hexInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") doApply();
     });
-    colorInput.addEventListener("change", doApply);
 
     newRow.appendChild(newLabel);
     newRow.appendChild(colorInput);
@@ -382,6 +414,42 @@ class HexLightCardElement extends HTMLElement {
     }
 
     this.appendChild(root);
+    this._lightId = primaryId;
+    this._built = true;
+  }
+
+  /**
+   * Incremental update after the DOM has been built once. Only display values
+   * change (state pill, current swatch/hex, picker swatch) — the input nodes
+   * themselves are never replaced, so an open native color picker or active
+   * text input survives live hass state updates.
+   */
+  _updateFromLight(light, isOn) {
+    if (this._pill) {
+      this._pill.textContent = light ? light.state.toUpperCase() : "?";
+      this._pill.style.background = isOn ? "#3cb44b" : "#888";
+    }
+    if (light) {
+      const info = readLightColor(light);
+      if (this._swatch) {
+        this._swatch.style.background = info.hex || "transparent";
+      }
+      if (this._curHex) {
+        this._curHex.textContent = info.hex || (isOn ? "n/a" : "off");
+      }
+      if (this._colorInput && this._hexInput && !this._picking) {
+        // The picker swatch mirrors the current color, but never clobbers a
+        // hex value Adrian is actively typing.
+        if (document.activeElement !== this._hexInput) {
+          const valid = normalizeHex(this._hexInput.value);
+          if (!valid) this._hexInput.value = info.hex || "#ffffff";
+          this._colorInput.value = normalizeHex(this._hexInput.value) || "#ffffff";
+        }
+      }
+      if (this._brightness == null && light.attributes.brightness != null) {
+        this._brightness = light.attributes.brightness;
+      }
+    }
   }
 }
 

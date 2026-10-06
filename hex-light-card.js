@@ -103,17 +103,23 @@ function hsvToRgb(h, s, v) {
 
 class HexLightCardElement extends HTMLElement {
   setConfig(config) {
-    if (!config || !config.entity) {
-      throw new Error("You did not specify an entity");
-    }
-    const entities = config.entity.split(",").map((s) => s.trim());
-    if (!entities.every((e) => e.startsWith("light."))) {
-      throw new Error(
-        "hex-light-card: entity must be a light (or comma-separated list of lights)"
-      );
-    }
-    if (config.type && !/hex-light-card(-feature)?$/.test(config.type)) {
+    if (!config) throw new Error("You did not specify an entity");
+    // As a standalone card `type` is "custom:hex-light-card"; as a tile
+    // feature the renderer passes "hex-light-card-feature" (no custom: prefix).
+    if (config.type && !/custom:hex-light-card(-feature)?/.test(config.type)) {
       throw new Error("Unknown card type: " + config.type);
+    }
+    // Standalone cards must name a light. A tile feature may omit `entity` —
+    // it inherits the parent tile's light (resolved at render time).
+    if (config.entity) {
+      const entities = config.entity.split(",").map((s) => s.trim());
+      if (!entities.every((e) => e.startsWith("light."))) {
+        throw new Error(
+          "hex-light-card: entity must be a light (or comma-separated list of lights)"
+        );
+      }
+    } else if (!/feature$/.test(config.type || "")) {
+      throw new Error("You did not specify an entity");
     }
     this._config = {
       ...config,
@@ -140,6 +146,20 @@ class HexLightCardElement extends HTMLElement {
     return document.createElement("hui-error-card");
   }
 
+  _resolveEntityId() {
+    if (this._config.entity) {
+      return this._config.entity.split(",")[0].trim();
+    }
+    // Tile feature: inherit the parent tile's light entity.
+    let el = this;
+    while (el) {
+      const attrs = el.getAttribute ? el.getAttribute("entity") : null;
+      if (attrs && attrs.startsWith("light.")) return attrs.trim();
+      el = el.parentElement;
+    }
+    return null;
+  }
+
   _applyColor(hexInput, setStatus, cfg, hass) {
     const normalized = normalizeHex(hexInput.value);
     if (!normalized) {
@@ -150,7 +170,11 @@ class HexLightCardElement extends HTMLElement {
     const data = { rgb_color: rgb };
     const brightness = this._brightness;
     if (brightness != null) data.brightness = brightness;
-    const ids = cfg.entity.split(",").map((s) => s.trim());
+    const ids = cfg.entity ? cfg.entity.split(",").map((s) => s.trim()) : [this._resolveEntityId()];
+    if (!ids[0]) {
+      setStatus("No light entity to target");
+      return;
+    }
     data.entity_id = ids.length > 1 ? ids : ids[0];
     hass.callService("light", "turn_on", data).then(
       () => setStatus("Applied " + normalized, true),
@@ -163,9 +187,9 @@ class HexLightCardElement extends HTMLElement {
     const cfg = this._config;
     if (!hass || !cfg) return;
 
-    // Primary entity is the first one listed (for a group, that's the group).
-    const primaryId = cfg.entity.split(",")[0].trim();
-    const light = hass.states[primaryId];
+    // Primary entity: explicit config, or the parent tile's light (feature).
+    const primaryId = this._resolveEntityId();
+    const light = primaryId ? hass.states[primaryId] : undefined;
     const isOn = !!(light && light.state === "on");
 
     this.innerHTML = "";
@@ -368,11 +392,21 @@ class HexLightCardFeatureElement extends HexLightCardElement {
   getCardSize() {
     return 3;
   }
+
+  static getStubConfig(ha, stateObj) {
+    // Tile feature stub: use the tile's own light when available.
+    const entity =
+      stateObj && stateObj.entity_id && stateObj.entity_id.startsWith("light.")
+        ? stateObj.entity_id
+        : "light.example";
+    return { entity };
+  }
 }
 
 customElements.define("hex-light-card", HexLightCardElement);
 customElements.define("hex-light-card-feature", HexLightCardFeatureElement);
 
+// Standalone card registration (also usable inside entities cards).
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === "hex-light-card")) {
   window.customCards.push({
@@ -383,14 +417,22 @@ if (!window.customCards.some((c) => c.type === "hex-light-card")) {
     preview: true,
   });
 }
-if (!window.customCards.some((c) => c.type === "hex-light-card-feature")) {
-  window.customCards.push({
+
+// Tile-feature registration. Required for use as a tile `features:` entry —
+// customCards alone is not enough for features.
+window.customCardFeatures = window.customCardFeatures || [];
+if (!window.customCardFeatures.some((c) => c.type === "hex-light-card-feature")) {
+  window.customCardFeatures.push({
     type: "hex-light-card-feature",
     name: "Hex Light Card (Tile feature)",
-    description:
-      "Add hex color setting to a Tile card.",
-    preview: true,
+    configurable: true,
   });
 }
+
+console.info(
+  "\n %c hex-light-card %c v" + CARD_VERSION + " \n",
+  "background-color: #555;color: #fff;padding: 3px 2px 3px 3px;border-radius: 3px 0 0 3px",
+  "background-color: #bc81e0;color: #fff;padding: 3px 2px 3px 2px;border-radius: 0 3px 3px 0"
+);
 
 export default HexLightCardElement;

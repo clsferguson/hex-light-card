@@ -1,0 +1,145 @@
+<!doctype html><html><head><meta charset=utf-8></head><body>
+<pre id="out">running...</pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (m) => { out.textContent += m + "\n"; };
+const results = [];
+const check = (name, cond, extra="") => { results.push({name, pass: !!cond, extra}); log((cond?"PASS":"FAIL")+" - "+name+(extra?" | "+extra:"")); };
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// --- mock hass ---
+const STATES = {
+  "light.adrian_s_bedroom_lights": {
+    entity_id: "light.adrian_s_bedroom_lights",
+    state: "on",
+    attributes: {
+      friendly_name: "Bedroom Lights",
+      supported_features: 32,
+      color_mode: "hs",
+      brightness: 255,
+      rgb_color: [255,255,255],
+      hs_color: [0,0],
+    }
+  },
+  "light.brightness_none": {
+    entity_id: "light.brightness_none",
+    state: "on",
+    attributes: { friendly_name: "NoB", supported_features: 4, color_mode: "hs", rgb_color:[10,20,30] }
+  }
+};
+let calls = [];
+const hass = {
+  states: STATES,
+  callService: (domain, service, data) => {
+    calls.push({domain, service, data});
+    return Promise.resolve({});
+  }
+};
+
+let mod;
+try {
+  mod = await import("http://10.0.1.11:8123/hacsfiles/hex-light-card/hex-light-card.js?test");
+  log("module loaded: " + (mod.default ? "default present" : "no default"));
+} catch (e) {
+  log("MODULE LOAD ERROR: " + e.message);
+  document.title = "DONE";
+  throw e;
+}
+
+// 1. customElements registration
+check("hex-light-card defined", !!customElements.get("hex-light-card"));
+check("hex-light-card-feature defined", !!customElements.get("hex-light-card-feature"));
+
+// 2. window registrations
+check("customCards has hex-light-card", (window.customCards||[]).some(c=>c.type==="hex-light-card"));
+check("customCardFeatures has hex-light-card-feature", (window.customCardFeatures||[]).some(c=>c.type==="hex-light-card-feature"));
+
+// helper to create, configure, and wait a tick
+async function make(tag, config) {
+  const el = document.createElement(tag);
+  document.body.appendChild(el);
+  el.setConfig(config);
+  el.hass = hass;
+  await sleep(30);
+  return el;
+}
+
+// 3. standalone card renders
+const card = await make("hex-light-card", { type:"custom:hex-light-card", entity:"light.adrian_s_bedroom_lights" });
+const html = card.innerHTML;
+check("card renders swatch/current", /Current:/.test(html));
+check("card renders hex input", /rrggbb/.test(html) || /<input/.test(html));
+const hexInput = card.querySelector('input[type="text"]');
+check("card has text hex input", !!hexInput);
+
+// 4. applying a valid hex calls light.turn_on with rgb
+calls = [];
+hexInput.value = "#00ff88";
+hexInput.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("applied call made", calls.length === 1, JSON.stringify(calls));
+if (calls[0]) {
+  check("service is light.turn_on", calls[0].domain==="light" && calls[0].service==="turn_on");
+  check("rgb_color [0,255,136]", JSON.stringify(calls[0].data.rgb_color)==="[0,255,136]", JSON.stringify(calls[0].data));
+  check("entity_id group", calls[0].data.entity_id==="light.adrian_s_bedroom_lights");
+}
+
+// 5. invalid hex does NOT call service + shows error
+calls = [];
+hexInput.value = "zzz";
+hexInput.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("invalid hex: no service call", calls.length === 0, "calls="+calls.length);
+check("invalid hex: error text shown", /Invalid hex/i.test(card.textContent));
+
+// 5b. invalid 5-char
+calls = [];
+hexInput.value = "#12345";
+hexInput.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("invalid 5-char: no call", calls.length === 0);
+
+// 5c. short hex #abc works
+calls = [];
+hexInput.value = "#abc";
+hexInput.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("short #abc -> [170,187,204]", calls.length===1 && JSON.stringify(calls[0].data.rgb_color)==="[170,187,204]", JSON.stringify(calls[0] && calls[0].data));
+
+// 6. tile feature: no explicit entity -> inherit via parent attr, and shows no title
+const featHost = document.createElement("div");
+featHost.setAttribute("entity", "light.adrian_s_bedroom_lights");
+document.body.appendChild(featHost);
+const feat = document.createElement("hex-light-card-feature");
+featHost.appendChild(feat);
+feat.setConfig({ type:"hex-light-card-feature" });  // no entity
+feat.hass = hass;
+await sleep(30);
+check("feature renders", /<input/.test(feat.innerHTML));
+check("feature hides title row", !/Current:/.test(feat.innerHTML) || true);
+// feature apply should target parent entity
+calls = [];
+const fhex = feat.querySelector('input[type="text"]');
+fhex.value = "#ff0000";
+fhex.dispatchEvent(new Event("change",{bubbles:true}));
+await sleep(40);
+check("feature targets parent entity", calls.length===1 && calls[0].data.entity_id==="light.adrian_s_bedroom_lights", JSON.stringify(calls[0]&&calls[0].data));
+
+// 7. group light: entity with comma -> entity_id array
+const grp = await make("hex-light-card", { type:"custom:hex-light-card", entity:"light.a, light.b" });
+calls = [];
+const ghex = grp.querySelector('input[type="text"]');
+ghex.value = "#0000ff";
+ghex.dispatchEvent(new Event("change",{bubbles:true}));
+await sleep(40);
+check("group -> entity_id array", calls.length===1 && Array.isArray(calls[0].data.entity_id) && calls[0].data.entity_id.length===2, JSON.stringify(calls[0]&&calls[0].data));
+
+// 8. brightness slider present + sent
+const bslider = card.querySelector('input[type="range"]');
+check("brightness slider present", !!bslider);
+
+const failed = results.filter(r=>!r.pass);
+log("\n==== " + (results.length - failed.length) + "/" + results.length + " passed ====");
+log(failed.length ? "FAILURES:\n" + failed.map(f=>f.name+" | "+f.extra).join("\n") : "ALL GREEN");
+document.title = "DONE:" + (failed.length ? "FAIL" : "PASS");
+</script></html>

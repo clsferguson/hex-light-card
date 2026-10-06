@@ -23,7 +23,7 @@
  *   initial_brightness (optional) initial slider value if the light has none
  */
 
-const CARD_VERSION = "1.0.1";
+const CARD_VERSION = "1.0.0";
 
 const HEX_FULL = /^#?([0-9a-fA-F]{6})$/;
 const HEX_SHORT = /^#?([0-9a-fA-F]{3})$/;
@@ -60,14 +60,8 @@ function hexToRgbArray(hex) {
 function readLightColor(state) {
   const a = state.attributes || {};
   const supportedFeatures = a.supported_features || 0;
-  // Legacy bit: FEATURE_SUPPORTS_RGB_COLOR = 2**2 = 4. Often unset on
-  // modern color-mode lights and light groups.
-  const legacyRgb = (supportedFeatures & 4) !== 0;
-  // Modern capability advertising: supported_color_modes.
-  const modes = a.supported_color_modes;
-  const colorModeRgb = Array.isArray(modes) &&
-    modes.some((m) => m === "hs" || m === "rgb" || m === "rgbw" || m === "rgbww" || m === "xy");
-  const supportsRgb = legacyRgb || colorModeRgb;
+  // FEATURE_SUPPORTS_RGB_COLOR = 2**2 = 4
+  const supportsRgb = (supportedFeatures & 4) !== 0;
 
   let rgb = null;
   if (state.state === "on") {
@@ -111,10 +105,8 @@ class HexLightCardElement extends HTMLElement {
   setConfig(config) {
     if (!config) throw new Error("You did not specify an entity");
     // As a standalone card `type` is "custom:hex-light-card"; as a tile
-    // The standalone card arrives as "custom:hex-light-card"; a tile feature
-    // arrives as "hex-light-card-feature" (the feature renderer strips the
-    // custom: prefix). Accept either form.
-    if (config.type && !/custom:hex-light-card(-feature)?|hex-light-card-feature/.test(config.type)) {
+    // feature the renderer passes "hex-light-card-feature" (no custom: prefix).
+    if (config.type && !/custom:hex-light-card(-feature)?/.test(config.type)) {
       throw new Error("Unknown card type: " + config.type);
     }
     // Standalone cards must name a light. A tile feature may omit `entity` —

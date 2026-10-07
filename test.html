@@ -25,7 +25,10 @@ const STATES = {
     entity_id: "light.brightness_none",
     state: "on",
     attributes: { friendly_name: "NoB", supported_features: 4, color_mode: "hs", rgb_color:[10,20,30] }
-  }
+  },
+  "light.a": { entity_id: "light.a", state: "on", attributes: { friendly_name: "A", supported_color_modes: ["rgb"], rgb_color: [1,2,3], brightness: 200 } },
+  "light.b": { entity_id: "light.b", state: "on", attributes: { friendly_name: "B", supported_color_modes: ["rgb"], rgb_color: [4,5,6], brightness: 200 } },
+  "light.off_zero": { entity_id: "light.off_zero", state: "off", attributes: { friendly_name: "OffZero", supported_features: 4, color_mode: "hs", brightness: 0 } }
 };
 let calls = [];
 const hass = {
@@ -116,7 +119,18 @@ feat.setConfig({ type:"hex-light-card-feature" });  // no entity
 feat.hass = hass;
 await sleep(30);
 check("feature renders", /<input/.test(feat.innerHTML));
-check("feature hides title row", !/Current:/.test(feat.innerHTML) || true);
+check("feature hides title row", !/Bedroom Lights/.test(feat.innerHTML));
+check("feature hides current row by default (v1.1)", !/Current:/.test(feat.innerHTML));
+// show_current opt-in: a second feature with explicit true must render it
+const feat2Host = document.createElement("div");
+feat2Host.setAttribute("entity", "light.adrian_s_bedroom_lights");
+document.body.appendChild(feat2Host);
+const feat2 = document.createElement("hex-light-card-feature");
+feat2Host.appendChild(feat2);
+feat2.setConfig({ type:"hex-light-card-feature", show_current:true });
+feat2.hass = hass;
+await sleep(30);
+check("feature shows current row when show_current:true", /Current:/.test(feat2.innerHTML));
 // feature apply should target parent entity
 calls = [];
 const fhex = feat.querySelector('input[type="text"]');
@@ -137,6 +151,62 @@ check("group -> entity_id array", calls.length===1 && Array.isArray(calls[0].dat
 // 8. brightness slider present + sent
 const bslider = card.querySelector('input[type="range"]');
 check("brightness slider present", !!bslider);
+
+// 9. (fix #1) color picker `change` applies the picked color even without a prior `input`
+calls = [];
+const cinput = card.querySelector('input[type="color"]');
+const hexInput9 = card.querySelector('input[type="text"]');
+hexInput9.value = "#000000";            // stale text value
+cinput.value = "#336699";               // picked color
+cinput.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("fix#1: change applies picked color (no prior input)",
+  calls.length===1 && JSON.stringify(calls[0].data.rgb_color)==="[51,102,153]", JSON.stringify(calls[0]&&calls[0].data));
+
+// 10. (fix #5) cancelling the picker (input then blur, no change) reverts the hex field
+cinput.value = "#123456";
+cinput.dispatchEvent(new Event("click", {bubbles:true}));
+cinput.dispatchEvent(new Event("input", {bubbles:true}));
+cinput.dispatchEvent(new Event("blur", {bubbles:true}));
+await sleep(20);
+check("fix#5: cancelled picker reverts hex field to light color", hexInput9.value === "#ffffff", "value=" + hexInput9.value);
+
+// 11. (fix #2) external brightness change is reflected in the slider + payload
+STATES["light.adrian_s_bedroom_lights"].attributes.brightness = 100;
+card.hass = hass;
+await sleep(30);
+const bslider11 = card.querySelector('input[type="range"]');
+check("fix#2: slider follows external brightness", bslider11.value === "100", "slider=" + bslider11.value);
+calls = [];
+const hexInput11 = card.querySelector('input[type="text"]');
+hexInput11.value = "#aabbcc";
+hexInput11.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("fix#2: next apply carries external brightness", calls.length===1 && calls[0].data.brightness === 100, JSON.stringify(calls[0]&&calls[0].data));
+
+// 12. (fix #3) off light with brightness 0 -> clamped apply payload
+const zcard = await make("hex-light-card", { type:"custom:hex-light-card", entity:"light.off_zero" });
+calls = [];
+const zhex = zcard.querySelector('input[type="text"]');
+zhex.value = "#00ff00";
+zhex.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("fix#3: brightness clamped to >=1", calls.length===1 && calls[0].data.brightness >= 1 && calls[0].data.brightness <= 255, JSON.stringify(calls[0]&&calls[0].data));
+
+// 13. (fix #4) service call goes to the CURRENT hass reference
+const callsB = [];
+const hassB = {
+  states: STATES,
+  callService: (domain, service, data) => { callsB.push({domain, service, data}); return Promise.resolve({}); }
+};
+card.hass = hassB;
+await sleep(30);
+calls = []; callsB.length = 0;
+const hexInput13 = card.querySelector('input[type="text"]');
+hexInput13.value = "#112233";
+hexInput13.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("fix#4: apply uses current hass reference", callsB.length===1 && calls.length===0, "new=" + callsB.length + " old=" + calls.length);
 
 const failed = results.filter(r=>!r.pass);
 log("\n==== " + (results.length - failed.length) + "/" + results.length + " passed ====");

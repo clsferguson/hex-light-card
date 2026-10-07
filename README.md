@@ -31,7 +31,7 @@ picker. The current color is shown as a live swatch.
 Add the resource in **Settings → Dashboards → ⋮ → Resources**:
 
 ```
-URL: https://<your-host>/hex-light-card.js?v=1.0.0
+URL: https://<your-host>/hex-light-card.js?v=1.1.0
 Type: JavaScript module
 ```
 
@@ -60,7 +60,7 @@ features:
 | `entity`         | string  | yes      | —       | A `light.` entity or light group                   |
 | `title`          | string  | no       | light name | Card title                                     |
 | `show_title`     | boolean | no       | `true`  | Show the title + state row (auto-off for the tile feature) |
-| `show_current`   | boolean | no       | `true`  | Show the current color swatch + hex                |
+| `show_current`   | boolean | no       | `true` (card) / `false` (tile feature) | Show the current color swatch + hex — the tile feature defaults this off (opt in with `show_current: true`) |
 | `brightness`     | boolean | no       | `true`  | Show the brightness slider                         |
 | `initial_brightness` | number | no     | light's value | Initial slider value if the light reports none |
 

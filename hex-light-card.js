@@ -23,7 +23,7 @@
  *   initial_brightness (optional) initial slider value if the light has none
  */
 
-const CARD_VERSION = "1.0.2";
+const CARD_VERSION = "1.1.0";
 
 const HEX_FULL = /^#?([0-9a-fA-F]{6})$/;
 const HEX_SHORT = /^#?([0-9a-fA-F]{3})$/;
@@ -143,7 +143,14 @@ class HexLightCardElement extends HTMLElement {
   }
 
   getCardSize() {
-    return 4; // rough height estimate in rows
+    // One row each: title, current-color, the no-RGB warning (when it will
+    // show), the set-color row, and the brightness slider.
+    const cfg = this._config || {};
+    let rows = 2; // set-color row + status
+    if (cfg.show_title !== false) rows += 1;
+    if (cfg.show_current !== false) rows += 1;
+    if (cfg.brightness !== false) rows += 1;
+    return rows;
   }
 
   static getStubConfig() {
@@ -166,6 +173,15 @@ class HexLightCardElement extends HTMLElement {
       el = el.parentElement;
     }
     return null;
+  }
+
+  /** Current color of the bound light as "#rrggbb", or null. */
+  _currentHex() {
+    const id = this._resolveEntityId();
+    const light = id && this._hass ? this._hass.states[id] : undefined;
+    if (!light) return null;
+    const info = readLightColor(light);
+    return info.hex || null;
   }
 
   _applyColor(hexInput, setStatus, cfg, hass) {
@@ -341,10 +357,13 @@ class HexLightCardElement extends HTMLElement {
     };
     this._setStatus = setStatus;
 
-    const doApply = () => this._applyColor(hexInput, setStatus, cfg, hass);
+    // Always read the current hass reference — never the first render's.
+    const doApply = () => this._applyColor(hexInput, setStatus, cfg, this._hass);
 
     colorInput.addEventListener("click", () => {
       this._picking = true;
+      // Start a pick session; only a `change` (committed pick) confirms it.
+      this._pick = { confirmed: false };
     });
     colorInput.addEventListener("input", () => {
       this._picking = true;
@@ -353,9 +372,25 @@ class HexLightCardElement extends HTMLElement {
     });
     colorInput.addEventListener("blur", () => {
       this._picking = false;
+      const pick = this._pick;
+      this._pick = null;
+      // Focus left the picker without a committed pick: roll the hex field
+      // back to the light's actual color so we don't display a value that
+      // was never applied.
+      if (pick && !pick.confirmed) {
+        const cur = this._currentHex();
+        if (cur) {
+          hexInput.value = cur;
+          colorInput.value = cur;
+        }
+      }
     });
     colorInput.addEventListener("change", () => {
       this._picking = false;
+      if (this._pick) this._pick.confirmed = true;
+      // Sync the text field BEFORE applying — never rely on a prior
+      // `input` event having fired (fixes stale-hex applies).
+      hexInput.value = colorInput.value;
       doApply();
     });
     hexInput.addEventListener("input", () => {
@@ -392,20 +427,27 @@ class HexLightCardElement extends HTMLElement {
       slider.min = "1";
       slider.max = "255";
       const curBright = light.attributes.brightness;
-      const init =
+      const rawInit =
         typeof curBright === "number"
           ? curBright
           : cfg.initial_brightness || 255;
+      // Clamp to HA's valid range (1-255) — an off light may report 0,
+      // which would otherwise be sent verbatim in the next apply.
+      const init = Math.min(255, Math.max(1, rawInit));
       slider.value = init;
       this._brightness = init;
+      this._brightnessSlider = slider;
       slider.style.flex = "1";
       const bVal = document.createElement("span");
       bVal.style.fontSize = "12px";
       bVal.style.fontFamily = "monospace";
       bVal.textContent = String(init);
+      this._brightnessVal = bVal;
       slider.addEventListener("input", () => {
         bVal.textContent = slider.value;
         this._brightness = parseInt(slider.value, 10);
+        // Local, not-yet-applied change: don't let state pushes clobber it.
+        this._brightnessDirty = true;
       });
       bRow.appendChild(bLabel);
       bRow.appendChild(slider);
@@ -449,6 +491,22 @@ class HexLightCardElement extends HTMLElement {
       if (this._brightness == null && light.attributes.brightness != null) {
         this._brightness = light.attributes.brightness;
       }
+      if (this._brightnessSlider) {
+        const b = light.attributes.brightness;
+        if (typeof b === "number") {
+          const clamped = Math.min(255, Math.max(1, b));
+          // Skip only when the user has a local, unapplied slider change —
+          // an external brightness change always wins otherwise (fixes
+          // the desync where the next apply reverted it).
+          const sliderVal = parseInt(this._brightnessSlider.value, 10);
+          if (!(this._brightnessDirty && sliderVal !== clamped)) {
+            this._brightnessSlider.value = clamped;
+            if (this._brightnessVal) this._brightnessVal.textContent = String(clamped);
+            this._brightness = clamped;
+            if (sliderVal === clamped) this._brightnessDirty = false;
+          }
+        }
+      }
     }
   }
 }
@@ -463,10 +521,19 @@ class HexLightCardFeatureElement extends HexLightCardElement {
   setConfig(config) {
     super.setConfig(config);
     this._config.show_title = false;
+    // Compact variant: the tile already shows name/state/current swatch,
+    // so the current-color row is redundant by default. Opt back in with
+    // `show_current: true` (note: inverted from the standalone card, where
+    // the default is true and you'd set `show_current: false`).
+    this._config.show_current = config.show_current === true;
   }
 
   getCardSize() {
-    return 3;
+    const cfg = this._config || {};
+    let rows = 2; // set-color row + status
+    if (cfg.show_current) rows += 1;
+    if (cfg.brightness !== false) rows += 1;
+    return rows;
   }
 
   static getStubConfig(ha, stateObj) {

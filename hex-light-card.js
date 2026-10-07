@@ -23,7 +23,7 @@
  *   initial_brightness (optional) initial slider value if the light has none
  */
 
-const CARD_VERSION = "1.1.1";
+const CARD_VERSION = "1.1.2";
 
 const HEX_FULL = /^#?([0-9a-fA-F]{6})$/;
 const HEX_SHORT = /^#?([0-9a-fA-F]{3})$/;
@@ -370,7 +370,13 @@ class HexLightCardElement extends HTMLElement {
 
     const hexInput = document.createElement("input");
     hexInput.type = "text";
-    hexInput.value = info.hex || "#ffffff";
+    // Preserve an in-progress edit across a full rebuild: rebuilds replace
+    // the input nodes, but a focused typing session means the old field's
+    // content is user content, not the light's color. (#15)
+    hexInput.value =
+      this._hexEditing != null && this._hexInput
+        ? this._hexInput.value
+        : info.hex || "#ffffff";
     this._hexInput = hexInput;
     hexInput.placeholder = "#rrggbb";
     // No maxLength: 6-char hex has no "#" at all (the regex allows it).
@@ -432,15 +438,34 @@ class HexLightCardElement extends HTMLElement {
       hexInput.value = colorInput.value;
       doApply();
     });
+    // Typing-session guard (fixes #15): the moment the field gains focus the
+    // value becomes USER content. No state push may clobber it — focus alone
+    // (no keystrokes) is enough to be "composing", because a push during a
+    // brief focus loss (mobile tap/scroll, native picker stealing focus)
+    // used to reset a partial value to the light's color / "#ffffff".
+    hexInput.addEventListener("focus", () => {
+      this._hexEditing = hexInput.value;
+    });
+    hexInput.addEventListener("blur", () => {
+      if (this._hexEditing == null) return;
+      this._hexEditing = null;
+      // Drop a stale error from an earlier commit so the next commit's
+      // validation starts clean (the change event re-validates and will
+      // re-show the error for a genuinely bad value).
+      setStatus("");
+    });
     hexInput.addEventListener("input", () => {
       // A keystroke: the field now holds a user-typed value.
       this._hexLastWrite = "typed";
       const n = normalizeHex(hexInput.value);
       if (n) {
+        // Valid intermediate value: preview it in the picker. NO error here —
+        // validation surfaces at commit (change/Enter), not per keystroke (#15).
         colorInput.value = n;
         setStatus("");
       } else if (hexInput.value.trim() !== "") {
-        setStatus("Invalid hex \u2014 use #RRGGBB or #RGB (e.g. #00ff88)");
+        // Partial value: leave the picker alone and stay silent. The commit
+        // path owns the "Invalid hex" message.
       } else {
         // Cleared the field: reflect that in the picker, clear the error.
         colorInput.value = "#ffffff";
@@ -448,7 +473,14 @@ class HexLightCardElement extends HTMLElement {
         setStatus("");
       }
     });
-    hexInput.addEventListener("change", doApply);
+    hexInput.addEventListener("change", () => {
+      // `change` always commits: either the user edited + left the field
+      // (or pressed Enter — deduped by _lastApplied), or a programmatic
+      // caller set the value. An unchanged focus→blur round-trip re-applies
+      // the current value, which is the same value already on the light, so
+      // it is a no-op in practice.
+      doApply();
+    });
     hexInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") doApply();
     });
@@ -529,9 +561,20 @@ class HexLightCardElement extends HTMLElement {
         this._curHex.textContent = info.hex || (isOn ? "n/a" : "off");
       }
       if (this._colorInput && this._hexInput && !this._picking) {
-        // The picker swatch mirrors the current color, but never clobbers a
-        // hex value the user is actively typing.
-        if (document.activeElement !== this._hexInput) {
+        // The light's color resyncs the field/picker — EXCEPT while the user
+        // is composing a value. The focus/typing-session flag (set on focus,
+        // cleared on blur) protects a partial value even across a brief,
+        // unintended focus loss (mobile tap/scroll, native picker stealing
+        // focus) — the old document.activeElement-only check could not, which
+        // let a state push reset mid-typing input to the light's color /
+        // "#ffffff" (the reported bug; #15). A real blur ends the session
+        // (flag → null); afterwards pushes may resync again.
+        const composing = this._hexEditing != null;
+        if (composing) {
+          const cur = normalizeHex(this._hexInput.value);
+          if (cur) this._colorInput.value = cur; // valid preview follows typing
+          // partial/empty: leave the field and picker exactly as the user left them
+        } else {
           const valid = normalizeHex(this._hexInput.value);
           if (!valid) this._hexInput.value = info.hex || "#ffffff";
           this._colorInput.value = normalizeHex(this._hexInput.value) || "#ffffff";

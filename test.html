@@ -316,6 +316,59 @@ await sleep(10);
 check("issue#14: cleared field -> picker #ffffff, no error",
   cinput20.value === "#ffffff" && !/Invalid hex/i.test(card.textContent), "picker=" + cinput20.value);
 
+// 23. (#15) focused typing: state pushes must not clobber a partial value
+hexInput18.focus();
+hexInput18.value = "#ff0";
+hexInput18.dispatchEvent(new Event("focus", {bubbles: true}));
+hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+card.hass = hass;
+await sleep(30);
+check("issue#15a: focused partial hex survives a state push", hexInput18.value === "#ff0", "value=" + hexInput18.value);
+check("issue#15a: no 'Invalid hex' while focused typing", !/Invalid hex/i.test(card.textContent));
+
+// 24. (#15) unfocused mid-edit: a push may resync the field again (no session)
+// (focus another element so activeElement actually moves, like a real blur)
+hexInput18.dispatchEvent(new Event("blur", {bubbles: true}));
+bslider19.focus();
+hexInput18.value = "#ff";
+hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+card.hass = hass;
+await sleep(30);
+check("issue#15b: unfocused stale partial is resynced to light color", hexInput18.value === "#ffffff", "value=" + hexInput18.value);
+
+// 25. (#15) per-keystroke typing stays silent (error only at commit)
+hexInput18.focus();
+hexInput18.dispatchEvent(new Event("focus", {bubbles: true}));
+let flashes = 0;
+for (const v of ["1","12","123","1234"]) {
+  hexInput18.value = v;
+  hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+  if (/Invalid hex/.test(card.textContent)) flashes++;
+}
+check("issue#15c: zero 'Invalid hex' flashes during 4 partial keystrokes", flashes === 0, "flashes=" + flashes);
+
+// 26. (#15) commit with an invalid final value: error shown at commit, no call
+calls = [];
+hexInput18.value = "zz";
+hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+hexInput18.dispatchEvent(new Event("change", {bubbles: true}));
+await sleep(40);
+check("issue#15d: invalid commit -> no call + error at commit",
+  calls.length === 0 && /Invalid hex/i.test(card.textContent), "calls=" + calls.length);
+hexInput18.dispatchEvent(new Event("blur", {bubbles: true}));
+
+// 27. (#15) a fully valid value typed + blur commits (change on blur path)
+calls = [];
+await sleep(300);   // clear the dedupe window
+hexInput18.value = "#ff9900";
+hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+hexInput18.dispatchEvent(new Event("blur", {bubbles: true}));
+hexInput18.dispatchEvent(new Event("change", {bubbles: true}));
+await sleep(40);
+check("issue#15e: typed valid value commits on blur",
+  calls.length === 1 && JSON.stringify(calls[0].data.rgb_color) === "[255,153,0]",
+  "calls=" + calls.length + (calls[0] ? JSON.stringify(calls[0].data.rgb_color) : ""));
+
 const failed = results.filter(r=>!r.pass);
 log("\n==== " + (results.length - failed.length) + "/" + results.length + " passed ====");
 log(failed.length ? "FAILURES:\n" + failed.map(f=>f.name+" | "+f.extra).join("\n") : "ALL GREEN");

@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset=utf-8></head>
+<style>
+  html,body{margin:0;padding:0;background:#111;}
+  body{display:flex;align-items:center;justify-content:center;min-height:100vh;
+       font-family:var(--primary-font-family, system-ui, sans-serif);}
+  .card-wrap{width:360px;}
+</style>
+<body>
+  <div class="card-wrap">
+    <hex-light-card id="pv"></hex-light-card>
+  </div>
+<script type="module">
+await import("./hex-light-card.js");
+const STATES = {
+  "light.bedroom": {
+    entity_id: "light.bedroom",
+    state: "on",
+    attributes: {
+      friendly_name: "Bedroom Lights",
+      supported_features: 36,
+      supported_color_modes: ["hs", "color_temp"],
+      color_mode: "hs",
+      brightness: 210,
+      rgb_color: [0, 200, 150],
+      hs_color: [163, 100],
+    }
+  }
+};
+const hass = {
+  states: STATES,
+  callService: () => Promise.resolve({})
+};
+const el = document.getElementById("pv");
+el.setConfig({ type: "custom:hex-light-card", entity: "light.bedroom", brightness: true });
+el.hass = hass;
+await new Promise(r => setTimeout(r, 60));
+document.title = "PV";
+</script>
+</body></html>

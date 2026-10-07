@@ -23,7 +23,7 @@
  *   initial_brightness (optional) initial slider value if the light has none
  */
 
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.1.1";
 
 const HEX_FULL = /^#?([0-9a-fA-F]{6})$/;
 const HEX_SHORT = /^#?([0-9a-fA-F]{3})$/;
@@ -187,21 +187,41 @@ class HexLightCardElement extends HTMLElement {
   _applyColor(hexInput, setStatus, cfg, hass) {
     const normalized = normalizeHex(hexInput.value);
     if (!normalized) {
-      setStatus("Invalid hex \u2014 use #RRGGBB (e.g. #00ff88)");
+      setStatus("Invalid hex \u2014 use #RRGGBB or #RGB (e.g. #00ff88)");
       return;
     }
+    // Enter + the blur `change` it triggers would otherwise double-fire the
+    // same value; collapse that into one service call.
+    const now = Date.now();
+    if (normalized === this._lastApplied && now - this._lastAppliedAt < 250) {
+      setStatus("Applied " + normalized, true);
+      return;
+    }
+    this._lastApplied = normalized;
+    this._lastAppliedAt = now;
     const rgb = hexToRgbArray(normalized);
     const data = { rgb_color: rgb };
+    const primaryId = this._resolveEntityId();
+    const light = primaryId && this._hass ? this._hass.states[primaryId] : undefined;
+    // Only send brightness while the light is ON. For an off light HA keeps
+    // its remembered brightness and restores it on next turn_on — sending an
+    // explicit value (a clamped 0 would land as 1) forces the light on dim.
     const brightness = this._brightness;
-    if (brightness != null) data.brightness = brightness;
-    const ids = cfg.entity ? cfg.entity.split(",").map((s) => s.trim()) : [this._resolveEntityId()];
+    if (light && light.state === "on" && brightness != null) {
+      data.brightness = brightness;
+    }
+    const ids = cfg.entity ? cfg.entity.split(",").map((s) => s.trim()) : [primaryId];
     if (!ids[0]) {
       setStatus("No light entity to target");
       return;
     }
     data.entity_id = ids.length > 1 ? ids : ids[0];
     hass.callService("light", "turn_on", data).then(
-      () => setStatus("Applied " + normalized, true),
+      () => {
+        // The value was just sent — the slider is no longer "local-only".
+        this._brightnessDirty = false;
+        setStatus("Applied " + normalized, true);
+      },
       (err) => setStatus("Error: " + (err && err.message ? err.message : err))
     );
   }
@@ -223,7 +243,17 @@ class HexLightCardElement extends HTMLElement {
 
     if (this._built) {
       if (!light) {
+        if (this._lightId === primaryId) {
+          // Same (still-missing) entity as the last render — the error row
+          // is already accurate; skip the rebuild churn on every push.
+          return;
+        }
         // Entity disappeared — fall through to a full rebuild (error row).
+        this.innerHTML = "";
+        this._built = false;
+      } else if (this._errorShown) {
+        // Entity (re)appeared — the error row must give way to a full build;
+        // _updateFromLight has no DOM to update on an error card.
         this.innerHTML = "";
         this._built = false;
       } else {
@@ -269,9 +299,14 @@ class HexLightCardElement extends HTMLElement {
     if (!light) {
       const msg = document.createElement("div");
       msg.style.color = "#c33";
-      msg.textContent = "Entity not found: " + primaryId;
+      msg.textContent = primaryId
+        ? "Entity not found: " + primaryId
+        : "No light entity found \u2014 add an entity or place this feature on a light tile.";
       root.appendChild(msg);
       this.appendChild(root);
+      this._lightId = primaryId;
+      this._built = true;
+      this._errorShown = true;
       return;
     }
 
@@ -338,7 +373,7 @@ class HexLightCardElement extends HTMLElement {
     hexInput.value = info.hex || "#ffffff";
     this._hexInput = hexInput;
     hexInput.placeholder = "#rrggbb";
-    hexInput.maxLength = 7;
+    // No maxLength: 6-char hex has no "#" at all (the regex allows it).
     hexInput.style.flex = "1";
     hexInput.style.minWidth = "90px";
     hexInput.style.fontSize = "15px";
@@ -368,6 +403,9 @@ class HexLightCardElement extends HTMLElement {
     colorInput.addEventListener("input", () => {
       this._picking = true;
       hexInput.value = colorInput.value;
+      // This value was written BY the picker — the cancel-rollback may
+      // legitimately undo it (a typed value may not).
+      this._hexLastWrite = "picker";
       setStatus("");
     });
     colorInput.addEventListener("blur", () => {
@@ -375,14 +413,15 @@ class HexLightCardElement extends HTMLElement {
       const pick = this._pick;
       this._pick = null;
       // Focus left the picker without a committed pick: roll the hex field
-      // back to the light's actual color so we don't display a value that
-      // was never applied.
-      if (pick && !pick.confirmed) {
+      // back to the light's actual color — but only when the field currently
+      // holds a PICKER-written value, never a value the user typed.
+      if (pick && !pick.confirmed && this._hexLastWrite === "picker") {
         const cur = this._currentHex();
         if (cur) {
           hexInput.value = cur;
           colorInput.value = cur;
         }
+        this._hexLastWrite = "light";
       }
     });
     colorInput.addEventListener("change", () => {
@@ -394,12 +433,19 @@ class HexLightCardElement extends HTMLElement {
       doApply();
     });
     hexInput.addEventListener("input", () => {
+      // A keystroke: the field now holds a user-typed value.
+      this._hexLastWrite = "typed";
       const n = normalizeHex(hexInput.value);
       if (n) {
         colorInput.value = n;
         setStatus("");
       } else if (hexInput.value.trim() !== "") {
-        setStatus("Invalid hex \u2014 use #RRGGBB (e.g. #00ff88)");
+        setStatus("Invalid hex \u2014 use #RRGGBB or #RGB (e.g. #00ff88)");
+      } else {
+        // Cleared the field: reflect that in the picker, clear the error.
+        colorInput.value = "#ffffff";
+        this._hexLastWrite = "light";
+        setStatus("");
       }
     });
     hexInput.addEventListener("change", doApply);
@@ -458,6 +504,9 @@ class HexLightCardElement extends HTMLElement {
     this.appendChild(root);
     this._lightId = primaryId;
     this._built = true;
+    this._errorShown = false;
+    // A rebuild created fresh input nodes — any local unsynced flag is stale.
+    this._brightnessDirty = false;
   }
 
   /**
@@ -481,7 +530,7 @@ class HexLightCardElement extends HTMLElement {
       }
       if (this._colorInput && this._hexInput && !this._picking) {
         // The picker swatch mirrors the current color, but never clobbers a
-        // hex value Adrian is actively typing.
+        // hex value the user is actively typing.
         if (document.activeElement !== this._hexInput) {
           const valid = normalizeHex(this._hexInput.value);
           if (!valid) this._hexInput.value = info.hex || "#ffffff";

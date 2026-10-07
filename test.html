@@ -28,7 +28,8 @@ const STATES = {
   },
   "light.a": { entity_id: "light.a", state: "on", attributes: { friendly_name: "A", supported_color_modes: ["rgb"], rgb_color: [1,2,3], brightness: 200 } },
   "light.b": { entity_id: "light.b", state: "on", attributes: { friendly_name: "B", supported_color_modes: ["rgb"], rgb_color: [4,5,6], brightness: 200 } },
-  "light.off_zero": { entity_id: "light.off_zero", state: "off", attributes: { friendly_name: "OffZero", supported_features: 4, color_mode: "hs", brightness: 0 } }
+  "light.off_zero": { entity_id: "light.off_zero", state: "off", attributes: { friendly_name: "OffZero", supported_features: 4, color_mode: "hs", brightness: 0 } },
+  "light.missing": { entity_id: "light.missing", state: "on", attributes: { friendly_name: "Missing", supported_color_modes: ["rgb"], rgb_color: [7,8,9], brightness: 200 } }
 };
 let calls = [];
 const hass = {
@@ -41,7 +42,7 @@ const hass = {
 
 let mod;
 try {
-  mod = await import("http://10.0.1.11:8123/hacsfiles/hex-light-card/hex-light-card.js?test");
+  mod = await import("./hex-light-card.js");
   log("module loaded: " + (mod.default ? "default present" : "no default"));
 } catch (e) {
   log("MODULE LOAD ERROR: " + e.message);
@@ -93,7 +94,7 @@ hexInput.value = "zzz";
 hexInput.dispatchEvent(new Event("change", {bubbles:true}));
 await sleep(40);
 check("invalid hex: no service call", calls.length === 0, "calls="+calls.length);
-check("invalid hex: error text shown", /Invalid hex/i.test(card.textContent));
+check("invalid hex: error text shown", /Invalid hex/i.test(card.textContent) && /#RGB/.test(card.textContent));
 
 // 5b. invalid 5-char
 calls = [];
@@ -184,14 +185,16 @@ hexInput11.dispatchEvent(new Event("change", {bubbles:true}));
 await sleep(40);
 check("fix#2: next apply carries external brightness", calls.length===1 && calls[0].data.brightness === 100, JSON.stringify(calls[0]&&calls[0].data));
 
-// 12. (fix #3) off light with brightness 0 -> clamped apply payload
+// 12. (fix #3) off light with brightness 0 -> no brightness in the payload
+// (HA restores its remembered brightness on the next turn_on instead of
+// the card forcing the light on at a clamped 1)
 const zcard = await make("hex-light-card", { type:"custom:hex-light-card", entity:"light.off_zero" });
 calls = [];
 const zhex = zcard.querySelector('input[type="text"]');
 zhex.value = "#00ff00";
 zhex.dispatchEvent(new Event("change", {bubbles:true}));
 await sleep(40);
-check("fix#3: brightness clamped to >=1", calls.length===1 && calls[0].data.brightness >= 1 && calls[0].data.brightness <= 255, JSON.stringify(calls[0]&&calls[0].data));
+check("fix#3: off light -> no brightness sent", calls.length===1 && calls[0].data.brightness === undefined, JSON.stringify(calls[0]&&calls[0].data));
 
 // 13. (fix #4) service call goes to the CURRENT hass reference
 const callsB = [];
@@ -207,6 +210,111 @@ hexInput13.value = "#112233";
 hexInput13.dispatchEvent(new Event("change", {bubbles:true}));
 await sleep(40);
 check("fix#4: apply uses current hass reference", callsB.length===1 && calls.length===0, "new=" + callsB.length + " old=" + calls.length);
+
+// 14. (#9-old-name, really #13) 3-char hex TYPED then committed sends real rgb
+card.hass = hass;   // test 13 pointed card at hassB
+await sleep(30);
+calls = [];
+const hexInput14 = card.querySelector('input[type="text"]');
+hexInput14.value = "abc";              // no "#", 3 chars
+hexInput14.dispatchEvent(new Event("input", {bubbles:true}));
+hexInput14.dispatchEvent(new Event("change", {bubbles:true}));
+await sleep(40);
+check("issue#9: 3-char hex 'abc' -> rgb [170,187,204]",
+  calls.length===1 && JSON.stringify(calls[0].data.rgb_color)==="[170,187,204]", JSON.stringify(calls[0]&&calls[0].data));
+
+// 15. (#10) clearing the field resets the picker swatch and the error
+const cinput15 = card.querySelector('input[type="color"]');
+cinput15.value = "#ff0000";
+hexInput14.value = "";
+hexInput14.dispatchEvent(new Event("input", {bubbles:true}));
+await sleep(10);
+check("issue#10: cleared field resets picker + error",
+  cinput15.value === "#ffffff" && !/Invalid hex/i.test(card.textContent),
+  "picker=" + cinput15.value);
+
+// 16. (#12) feature with no entity anywhere: helpful error, no per-push churn
+const feat3 = document.createElement("hex-light-card-feature");
+document.body.appendChild(feat3);   // no parent with entity attr
+feat3.setConfig({ type:"hex-light-card-feature" });
+feat3.hass = hass;
+await sleep(30);
+check("issue#12: no 'Entity not found: undefined'",
+  !/Entity not found: undefined/.test(feat3.textContent) && /No light entity found/.test(feat3.textContent),
+  feat3.textContent.slice(0, 80));
+const rows16 = feat3.querySelectorAll("div > div").length;
+const h4 = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "innerHTML");
+// push the same state again — error row must NOT multiply
+feat3.hass = hass;
+await sleep(30);
+const rows16b = feat3.querySelectorAll("div > div").length;
+check("issue#12: no rebuild churn on repeated missing entity", rows16b === rows16, rows16 + " -> " + rows16b);
+
+// 17. (#13) missing entity appears later: card recovers
+delete STATES["light.missing"];
+const mcard = await make("hex-light-card", { type:"custom:hex-light-card", entity:"light.missing" });
+check("issue#13: missing entity shows error row", /Entity not found: light\.missing/.test(mcard.textContent));
+STATES["light.missing"] = { entity_id: "light.missing", state: "on", attributes: { friendly_name: "Missing", supported_color_modes: ["rgb"], rgb_color: [7,8,9], brightness: 200 } };
+mcard.hass = hass;
+await sleep(30);
+check("issue#13: recovers when entity appears", /#070809/.test(mcard.textContent) && !/Entity not found/.test(mcard.textContent));
+
+// 18. (#9) Enter then blur-change applies ONCE, not twice
+card.hass = hass;   // test 13 pointed card at hassB
+calls = [];
+await sleep(300);   // outside the 250ms dedupe window
+const hexInput18 = card.querySelector('input[type="text"]');
+hexInput18.value = "#010203";
+hexInput18.dispatchEvent(new Event("keydown", {key: "Enter", bubbles: true}));
+hexInput18.dispatchEvent(new Event("change", {bubbles: true}));
+await sleep(40);
+check("issue#9: Enter + change = one service call", calls.length === 1, "calls=" + calls.length);
+
+// 19. (#10) apply clears the brightnessDirty latch: next external change syncs
+const bslider19 = card.querySelector('input[type="range"]');
+bslider19.value = "50";
+bslider19.dispatchEvent(new Event("input", {bubbles: true}));
+await sleep(300);
+calls = [];
+hexInput18.value = "#040506";
+hexInput18.dispatchEvent(new Event("change", {bubbles: true}));
+await sleep(40);                       // apply resolves -> latch cleared
+STATES["light.adrian_s_bedroom_lights"].attributes.brightness = 200;
+card.hass = hass;
+await sleep(30);
+check("issue#10: after apply, external brightness re-syncs slider", bslider19.value === "200", "slider=" + bslider19.value);
+calls = [];
+hexInput18.value = "#07080a";
+hexInput18.dispatchEvent(new Event("change", {bubbles: true}));
+await sleep(40);
+check("issue#10: next apply carries the external brightness", calls.length===1 && calls[0].data.brightness === 200, JSON.stringify(calls[0]&&calls[0].data));
+
+// 20. (#12) blur rollback keeps a TYPED value (picker session open, no commit)
+const cinput20 = card.querySelector('input[type="color"]');
+cinput20.dispatchEvent(new Event("click", {bubbles: true}));   // open pick session
+hexInput18.value = "#102030";
+hexInput18.dispatchEvent(new Event("input", {bubbles: true})); // user types
+cinput20.dispatchEvent(new Event("blur", {bubbles: true}));    // cancel/blur
+await sleep(20);
+check("issue#12: typed value survives unconfirmed-picker blur", hexInput18.value === "#102030", "value=" + hexInput18.value);
+
+// 21. (#13) hash-less 6-char hex is typable end-to-end
+calls = [];
+await sleep(300);
+hexInput18.value = "0f1e2d";
+hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+hexInput18.dispatchEvent(new Event("change", {bubbles: true}));
+await sleep(40);
+check("issue#13: hash-less '0f1e2d' applies [15,30,45]",
+  calls.length===1 && JSON.stringify(calls[0].data.rgb_color)==="[15,30,45]", JSON.stringify(calls[0]&&calls[0].data));
+
+// 22. (#14) clearing the field resets picker + clears error
+cinput20.value = "#ff0000";
+hexInput18.value = "";
+hexInput18.dispatchEvent(new Event("input", {bubbles: true}));
+await sleep(10);
+check("issue#14: cleared field -> picker #ffffff, no error",
+  cinput20.value === "#ffffff" && !/Invalid hex/i.test(card.textContent), "picker=" + cinput20.value);
 
 const failed = results.filter(r=>!r.pass);
 log("\n==== " + (results.length - failed.length) + "/" + results.length + " passed ====");
